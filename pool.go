@@ -63,7 +63,9 @@ func (p pool[T]) Drain(ctx context.Context, offset int) <-chan T {
 			ctx:    ctx,
 			offset: offset,
 		}
-		p.submitRequest(rq)
+		if err := p.submitRequest(rq); err != nil {
+			return
+		}
 
 		for {
 			select {
@@ -106,7 +108,11 @@ func (p pool[T]) run(ctx context.Context, data *offsetData[T]) {
 		case rq := <-p.requests:
 			if data.LengthFrom(rq.offset) == 0 {
 				// nothing to send, place in waiting until something arrives.
-				go p.waitAndResubmit(rq, p.getWaitLock())
+				go func() {
+					if err := p.waitAndResubmit(rq, p.getWaitLock()); err != nil {
+						return
+					}
+				}()
 				continue
 			}
 			go p.serviceRequest(rq, data.SliceFrom(rq.offset))

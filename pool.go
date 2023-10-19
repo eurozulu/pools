@@ -27,7 +27,7 @@ type pool[T any] struct {
 
 	requests      chan request[T]
 	waitLock      chan struct{}
-	waitLockMutex sync.Mutex
+	waitLockMutex *sync.Mutex
 
 	policy Policy
 }
@@ -200,10 +200,11 @@ func NewPool[T any](ctx context.Context, policy Policy, data ...T) Pool[T] {
 		log.Fatalln("policy is unconstrained. Pool can not have unlimited memory")
 	}
 	p := &pool[T]{
-		feed:     make(chan T),
-		requests: make(chan request[T], 10),
-		done:     make(chan struct{}),
-		policy:   policy,
+		feed:          make(chan T),
+		requests:      make(chan request[T], 10),
+		done:          make(chan struct{}),
+		policy:        policy,
+		waitLockMutex: &sync.Mutex{},
 	}
 	go p.runPool(ctx, &offsetData[T]{
 		data:   data,

@@ -2,53 +2,115 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/eurozulu/pools"
+	"io"
+	"log"
 	"os"
-
+	"os/signal"
 	"strings"
+	"time"
 )
+
+type PoolTest struct {
+	Name string
+}
 
 func main() {
 	ctx, cnl := context.WithCancel(context.Background())
 	defer cnl()
 
-	p := pools.NewPool[string](ctx, strings.Split("hello world, how you doing?\n", " ")...)
-	for i := 0; i < 5; i++ {
-		go drain(ctx, p, fmt.Sprintf("drain %d", i))
+	buf := bytes.NewBufferString("======Buffer log========\n")
+	defer func(initLen int) {
+		log.Printf("Closing pool with %d bytes in buffer\n", buf.Len()-initLen)
+		log.Println(buf.String())
+	}(buf.Len())
+
+	log.Println("starting....")
+
+	pt := NewPoolTest(strings.Split("hello world, how you doing?\n", " ")...)
+
+	p := pools.NewPool[*PoolTest](ctx, pools.Policy{
+		Count: 2,
+	}, pt...)
+
+	ctxx, cnlx := context.WithCancel(ctx)
+	for i := 0; i < 500; i++ {
+		name := fmt.Sprintf("buffer-read-%03d", i)
+		go readPool(ctxx, p, name, buf)
 	}
+	defer cnlx()
 
-	done := feed(ctx, p)
-	fmt.Println("waiting")
-	<-done
-	fmt.Println("done")
+	//go readPool(ctx, p, "console-read", os.Stdout)
+	//go feedPool(ctx, p, "feed-haha", "ha", "ha")
 
+	//go feedPool(ctx, p, "feed-mary", strings.Split("Mary had a little lamb", " ")...)
+
+	//go feedPool(ctx, p, "console1")
+
+	sig := make(chan os.Signal)
+	signal.Notify(sig, os.Kill, os.Interrupt)
+	select {
+	case <-sig:
+		return
+	case <-time.After(time.Second):
+		break
+	}
+	cnl()
+	fmt.Printf("wait to close")
+	p.WaitForClose()
+	fmt.Printf("done")
 }
 
-func drain(ctx context.Context, p pools.Pool[string], id string) {
-	for r := range p.Drain(ctx, 0) {
-		fmt.Printf("%s: '%v'\n", id, r)
-	}
-}
-
-func feed(ctx context.Context, p pools.Pool[string]) chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		chin := make(chan string)
-		p.Feed(ctx, chin)
-		scn := bufio.NewScanner(os.Stdin)
-		for scn.Scan() {
-			if scn.Text() == "exit" {
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case chin <- scn.Text():
-			}
+func readPool[T any](ctx context.Context, pool pools.Pool[T], name string, out io.Writer) {
+	fmt.Printf("%s: reading started\n", name)
+	defer fmt.Printf("%s: reading closing\n", name)
+	ch := pool.Read(ctx, -1)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-ch:
+			fmt.Fprintf(out, "%s: %v\n", name, t)
 		}
-	}()
-	return done
+	}
+}
+
+func feedPool(ctx context.Context, p pools.Pool[*PoolTest], name string, items ...string) {
+	fmt.Printf("%s: feeding started\n", name)
+	defer fmt.Printf("%s: feeding closing\n", name)
+
+	ch := make(chan *PoolTest)
+	done := p.Feed(ctx, ch)
+	var src io.Reader
+	if len(items) == 0 {
+		src = os.Stdin
+	} else {
+		src = bytes.NewBufferString(strings.Join(items, "\n"))
+	}
+	scn := bufio.NewScanner(src)
+	for scn.Scan() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			// Pool is no longer servicing request
+			return
+		case ch <- &PoolTest{Name: scn.Text()}:
+		}
+	}
+}
+
+func (pt PoolTest) String() string {
+	return pt.Name
+}
+
+func NewPoolTest(s ...string) []*PoolTest {
+	pt := make([]*PoolTest, len(s))
+	for i, sz := range s {
+		pt[i] = &PoolTest{Name: sz}
+	}
+	return pt
 }
